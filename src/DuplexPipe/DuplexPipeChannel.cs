@@ -5,10 +5,13 @@
     using System.IO.Pipes;
     using System.Runtime.Serialization.Formatters;
     using System.Threading;
+    using System.Threading.Tasks;
     using Newtonsoft.Json;
 
     internal sealed class DuplexPipeChannel : IDisposable, IDuplexChannel
     {
+        private readonly ChannelSettings settings;
+
         private static readonly JsonSerializerSettings JsonSettings = new JsonSerializerSettings
         {
             Formatting = Formatting.None,
@@ -25,12 +28,13 @@
         private readonly TextReader reader;
 
         private readonly LocalBus bus = new LocalBus();
-        //private readonly Thread listentingThread;
+        private readonly Task listentingTask;
         private readonly CancellationTokenSource threadCancelationTokens;
         private bool disposed;
 
-        public DuplexPipeChannel(PipeStream outStream, PipeStream inStream)
+        public DuplexPipeChannel(PipeStream outStream, PipeStream inStream, ChannelSettings settings = null)
         {
+            this.settings = settings ?? ChannelSettings.Default;
             this.OutStream = outStream;
             this.InStream = inStream;
 
@@ -38,11 +42,8 @@
             reader = new StreamReader(inStream);
 
             threadCancelationTokens = new CancellationTokenSource();
-            //listentingThread = new Thread(Listener)
-            //{
-            //    Name = "Listener-" + DateTime.Now.Ticks
-            //};
-            //listentingThread.Start(this);
+
+            listentingTask = Task.Factory.StartNew(Listener, this, TaskCreationOptions.LongRunning);
         }
 
         ~DuplexPipeChannel()
@@ -117,8 +118,11 @@
 
             writer.WriteLine(dehydreated);
             writer.Flush();
-            // wed don't care that client actually reads it before we exit
-            //outStream.WaitForPipeDrain();
+
+            if (settings.WaitForDrain)
+            {
+                OutStream.WaitForPipeDrain();
+            }
         }
 
         public void Publish(object payload)
@@ -128,25 +132,32 @@
             bus.Publish(payload);
         }
 
-        public void Always<T>(string key, Action<T> callback)
+        public void Always<T>(Action<T> callback)
         {
             ThrowIfDisposed();
 
-            bus.Always<T>(key, callback);
+            bus.Always<T>(callback);
         }
 
-        public void Once<T>(string key, Action<T> callback)
+        public void Once<T>(Action<T> callback)
         {
             ThrowIfDisposed();
 
-            bus.Always<T>(key, callback);
+            bus.Always<T>(callback);
         }
 
-        public void Forget<T>(string key)
+        public void Forget<T>()
         {
             ThrowIfDisposed();
 
-            bus.Forget<T>(key);
+            bus.Forget<T>();
+        }
+
+        public void ForgetAll()
+        {
+            ThrowIfDisposed();
+
+            bus.ForgetAll();
         }
 
         private void Dispose(bool disposing)
@@ -154,13 +165,22 @@
             if (!disposed && disposing)
             {
                 threadCancelationTokens.Cancel();
-                //if (!listentingThread.Join(TimeSpan.FromSeconds(30)))
-                //{
-                //    listentingThread.Abort();
-                //}
+                try
+                {
+                    listentingTask.Wait(settings.ReaderTimeout);
+                }
+                catch (AggregateException ex)
+                {
+                    if (ex.InnerExceptions.Count != 1 || !(ex.InnerException is OperationCanceledException))
+                    {
+                        throw;
+                    }
+                }
 
                 writer.Dispose();
                 reader.Dispose();
+
+                bus.ForgetAll();
 
                 disposed = true;
             }

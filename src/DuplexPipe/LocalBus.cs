@@ -3,57 +3,118 @@
     using System;
     using System.Collections.Generic;
     using System.Linq;
+    using System.Reflection;
 
     internal sealed class LocalBus : IBus
     {
-        private readonly Dictionary<Type, Dictionary<string, Delegate>> callbacks =
-            new Dictionary<Type, Dictionary<string, Delegate>>();
+        private readonly Dictionary<Type, HashSet<Event>> callbacks =
+            new Dictionary<Type, HashSet<Event>>();
 
         public void Publish(object payload)
         {
             Type payloadType = payload.GetType();
-            Dictionary<string, Delegate> items;
+
+            HashSet<Event> items;
             if (callbacks.TryGetValue(payloadType, out items))
             {
-                foreach (var callback in items.Values.ToList())
+                foreach (Event @event in items.ToList())
                 {
-                    callback.DynamicInvoke(payload);
+                    if (!@event.Execute(payload))
+                    {
+                        items.Remove(@event);
+                    }
                 }
             }
         }
 
-        public void Always<T>(string key, Action<T> callback)
+        private void RegisterEventHandler<T>(Action<T> callback, bool permanent)
         {
             Type payloadType = typeof(T);
-            Dictionary<string, Delegate> items;
+            HashSet<Event> items;
             if (!callbacks.TryGetValue(payloadType, out items))
             {
-                items = new Dictionary<string, Delegate>();
+                items = new HashSet<Event>();
                 callbacks[payloadType] = items;
             }
 
-            items[key] = callback;
+            items.Add(new Event(callback, permanent));
         }
 
-        public void Once<T>(string key, Action<T> callback)
+        public void Always<T>(Action<T> callback)
         {
-            Always<T>(key, sig =>
-            {
-                Forget<T>(key);
-                callback(sig);
-            });
+            RegisterEventHandler(callback, permanent: true);
         }
 
-        public void Forget<T>(string key)
+        public void Once<T>(Action<T> callback)
         {
-            Type payloadType = typeof(T);
-            Dictionary<string, Delegate> items;
-            if (callbacks.TryGetValue(payloadType, out items))
+            RegisterEventHandler(callback, permanent: false);
+        }
+
+        public void Forget<T>()
+        {
+            HashSet<Event> items;
+            if (callbacks.TryGetValue(typeof(T), out items))
             {
-                if (items.ContainsKey(key))
+                items.Clear();
+            }
+        }
+
+        public void ForgetAll()
+        {
+            callbacks.Clear();
+        }
+
+        private sealed class Event : IEquatable<Event>
+        {
+            private readonly bool permanent;
+
+            private readonly Delegate callback;
+
+            public Event(Delegate callback, bool permanent)
+            {
+                if (callback == null) throw new ArgumentNullException(nameof(callback));
+
+                this.permanent = permanent;
+                this.callback = callback;
+            }
+
+            public bool Execute<T>(T payload)
+            {
+                callback.DynamicInvoke(payload);
+                return permanent;
+            }
+
+            public bool Equals(Event other)
+            {
+                if (ReferenceEquals(null, other)) return false;
+                if (ReferenceEquals(this, other)) return true;
+                return permanent == other.permanent && Equals(callback, other.callback);
+            }
+
+            public override bool Equals(object obj)
+            {
+                if (ReferenceEquals(null, obj)) return false;
+                if (ReferenceEquals(this, obj)) return true;
+                return obj is Event && Equals((Event) obj);
+            }
+
+            public override int GetHashCode()
+            {
+                const int prime = 397;
+                unchecked
                 {
-                    items.Remove(key);
+                    return (permanent.GetHashCode() * prime) ^ callback.GetHashCode();
                 }
+            }
+
+            public static bool operator ==(Event left, Event right)
+            {
+                return Equals(left, right);
+            }
+
+            public static bool operator !=(Event left, Event right)
+            {
+                return !Equals(left, right);
             }
         }
     }

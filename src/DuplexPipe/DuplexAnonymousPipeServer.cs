@@ -4,20 +4,23 @@
     using System.IO;
     using System.IO.Pipes;
 
-    public class DuplexAnonymousPipeServer : IDuplexChannel, IDisposable
+    public class DuplexAnonymousPipeServer : IDisposable
     {
         private readonly DuplexPipeChannel channel;
         private bool disposed;
 
-        public DuplexAnonymousPipeServer()
+        public IDuplexChannel Channel => channel;
+
+        public DuplexAnonymousPipeServer(ChannelSettings settings = null)
             : this(sender: new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.Inheritable),
-                   receiver: new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable))
+                   receiver: new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable),
+                   settings: settings)
         {
         }
 
-        public DuplexAnonymousPipeServer(AnonymousPipeServerStream sender, AnonymousPipeServerStream receiver)
+        public DuplexAnonymousPipeServer(AnonymousPipeServerStream sender, AnonymousPipeServerStream receiver, ChannelSettings settings = null)
         {
-            channel = new DuplexPipeChannel(sender, receiver);
+            channel = new DuplexPipeChannel(sender, receiver, settings);
         }
 
         ~DuplexAnonymousPipeServer()
@@ -28,41 +31,6 @@
         private void ThrowIfDisposed()
         {
             if (disposed) throw new ObjectDisposedException(nameof(DuplexAnonymousPipeServer));
-        }
-
-        public void Publish(object payload)
-        {
-            ThrowIfDisposed();
-
-            throw new NotSupportedException();
-        }
-
-        public void Signal<T>(T payload)
-        {
-            ThrowIfDisposed();
-
-            channel.Signal(payload);
-        }
-
-        public void Always<T>(string key, Action<T> callback)
-        {
-            ThrowIfDisposed();
-
-            channel.Always(key, callback);
-        }
-
-        public void Once<T>(string key, Action<T> callback)
-        {
-            ThrowIfDisposed();
-
-            channel.Once(key, callback);
-        }
-
-        public void Forget<T>(string key)
-        {
-            ThrowIfDisposed();
-
-            channel.Forget<T>(key);
         }
 
         public Handles GetConnectionHandles()
