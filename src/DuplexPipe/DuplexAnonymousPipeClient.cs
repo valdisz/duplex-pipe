@@ -10,14 +10,14 @@
 
         public IDuplexChannel Channel => channel;
 
-        public DuplexAnonymousPipeClient(string senderHandle, string receiverHandle, ChannelSettings settings = null)
+        public DuplexAnonymousPipeClient(string senderHandle, string receiverHandle, ChannelSettings? settings = null)
             : this(sender: new AnonymousPipeClientStream(PipeDirection.Out, receiverHandle),
                    receiver: new AnonymousPipeClientStream(PipeDirection.In, senderHandle),
                    settings: settings)
         {
         }
 
-        public DuplexAnonymousPipeClient(AnonymousPipeClientStream sender, AnonymousPipeClientStream receiver, ChannelSettings settings = null)
+        public DuplexAnonymousPipeClient(AnonymousPipeClientStream sender, AnonymousPipeClientStream receiver, ChannelSettings? settings = null)
         {
             if (sender == null) throw new ArgumentNullException(nameof(sender));
             if (receiver == null) throw new ArgumentNullException(nameof(receiver));

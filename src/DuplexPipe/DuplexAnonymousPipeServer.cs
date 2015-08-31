@@ -11,14 +11,14 @@
 
         public IDuplexChannel Channel => channel;
 
-        public DuplexAnonymousPipeServer(ChannelSettings settings = null)
+        public DuplexAnonymousPipeServer(ChannelSettings? settings = null)
             : this(sender: new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.Inheritable),
                    receiver: new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable),
                    settings: settings)
         {
         }
 
-        public DuplexAnonymousPipeServer(AnonymousPipeServerStream sender, AnonymousPipeServerStream receiver, ChannelSettings settings = null)
+        public DuplexAnonymousPipeServer(AnonymousPipeServerStream sender, AnonymousPipeServerStream receiver, ChannelSettings? settings = null)
         {
             channel = new DuplexPipeChannel(sender, receiver, settings);
         }

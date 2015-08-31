@@ -3,45 +3,30 @@
     using System;
     using System.IO;
     using System.IO.Pipes;
-    using System.Runtime.Serialization.Formatters;
+    using System.Runtime.InteropServices;
     using System.Threading;
     using System.Threading.Tasks;
-    using Newtonsoft.Json;
 
     internal sealed class DuplexPipeChannel : IDisposable, IDuplexChannel
     {
         private readonly ChannelSettings settings;
 
-        private static readonly JsonSerializerSettings JsonSettings = new JsonSerializerSettings
-        {
-            Formatting = Formatting.None,
-            ObjectCreationHandling = ObjectCreationHandling.Replace,
-            TypeNameHandling = TypeNameHandling.Objects,
-            TypeNameAssemblyFormat = FormatterAssemblyStyle.Simple,
-            ConstructorHandling = ConstructorHandling.AllowNonPublicDefaultConstructor
-        };
 
         public PipeStream OutStream { get; }
-        private readonly TextWriter writer;
-
         public PipeStream InStream { get; }
-        private readonly TextReader reader;
 
         private readonly LocalBus bus = new LocalBus();
         private readonly Task listentingTask;
-        private readonly CancellationTokenSource threadCancelationTokens;
+        private readonly CancellationTokenSource thrCancelTokens;
         private bool disposed;
 
-        public DuplexPipeChannel(PipeStream outStream, PipeStream inStream, ChannelSettings settings = null)
+        public DuplexPipeChannel(PipeStream outStream, PipeStream inStream, ChannelSettings? settings = null)
         {
             this.settings = settings ?? ChannelSettings.Default;
             this.OutStream = outStream;
             this.InStream = inStream;
 
-            writer = new StreamWriter(outStream);
-            reader = new StreamReader(inStream);
-
-            threadCancelationTokens = new CancellationTokenSource();
+            thrCancelTokens = new CancellationTokenSource();
 
             listentingTask = Task.Factory.StartNew(Listener, this, TaskCreationOptions.LongRunning);
         }
@@ -59,65 +44,143 @@
             }
         }
 
-        private static void Listener(object args)
+        [StructLayout(LayoutKind.Explicit)]
+        private struct HeaderPacket
         {
-            DuplexPipeChannel channel = (DuplexPipeChannel)args;
+            [FieldOffset(0)]
+            public bool Final;
 
-            IBus bus = channel.bus;
-            TextReader reader = channel.reader;
-            CancellationTokenSource cts = channel.threadCancelationTokens;
-            CancellationToken token = cts.Token;
+            [FieldOffset(8)]
+            public int Size;
+        }
+        private static readonly int HeaderPacketSize = Marshal.SizeOf(typeof(HeaderPacket));
 
+        private static int ReadBytes(byte[] buffer, Stream stream)
+        {
+            int red = 0;
+
+            //Loop until we've read enough bytes (usually once) 
+            while (red < buffer.Length)
+            {
+                red += stream.Read(buffer, red, buffer.Length - red); //Read bytes 
+            }
+
+            return red;
+        }
+
+        private static byte[] HeaderPacktToByteArray(HeaderPacket header)
+        {
+            byte[] buff = new byte[HeaderPacketSize];//Create Buffer
+            GCHandle handle = GCHandle.Alloc(buff, GCHandleType.Pinned);//Hands off GC
             try
             {
-                while (!token.IsCancellationRequested)
-                {
-                    var readTask = reader.ReadLineAsync();
-                    readTask.Wait(token);
-                    if (token.IsCancellationRequested)
-                    {
-                        break;
-                    }
+                Marshal.StructureToPtr(header, handle.AddrOfPinnedObject(), false);
+                return buff;
+            }
+            finally
+            {
+                handle.Free();
+            }
+        }
 
-                    string payload = readTask.Result;
-                    if (string.IsNullOrWhiteSpace(payload))
+        private static void Listener(object args)
+        {
+            DuplexPipeChannel channel = (DuplexPipeChannel) args;
+
+            IBus bus = channel.bus;
+            Stream stream = channel.InStream;
+            IHydrator hydrator = channel.settings.Hydrator;
+
+            CancellationTokenSource cts = channel.thrCancelTokens;
+            CancellationToken token = cts.Token;
+
+            while (!token.IsCancellationRequested)
+            {
+                object payload;
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    bool final;
+                    do
+                    {
+                        byte[] buffer = new byte[HeaderPacketSize];
+                        var handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+                        try
+                        {
+                            ReadBytes(buffer, stream);
+                            HeaderPacket header =
+                                (HeaderPacket)
+                                    Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof (HeaderPacket));
+                            final = header.Final;
+
+                            if (token.IsCancellationRequested)
+                            {
+                                break;
+                            }
+
+                            if (header.Size > 0)
+                            {
+                                byte[] dataBuffer = new byte[header.Size];
+                                var red = ReadBytes(dataBuffer, stream);
+                                ms.Write(dataBuffer, 0, red); 
+                            }
+                        }
+                        finally
+                        {
+                            handle.Free();
+                        }
+                    } while (!final && !token.IsCancellationRequested);
+
+                    if (ms.Length == 0)
                     {
                         continue;
                     }
+                    ms.Seek(0, SeekOrigin.Begin);
 
-                    if (!token.IsCancellationRequested)
+                    try
                     {
-                        object hydratedPayload = Hydrate(payload);
-                        bus.Publish(hydratedPayload);
+                        payload = hydrator.Hydrate(ms);
+                    }
+                    catch
+                    {
+                        payload = null;
                     }
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                // we do nothing here as it is expected exception
-            }
-        }
 
-        private static string Dehydrate<T>(T payload)
-        {
-            string json = JsonConvert.SerializeObject(payload, JsonSettings);
-            return json;
-        }
-
-        private static object Hydrate(string json)
-        {
-            object hydrated = JsonConvert.DeserializeObject(json, JsonSettings);
-            return hydrated;
+                if (payload != null)
+                {
+                    bus.Publish(payload);
+                }
+            }
         }
 
         public void Signal<T>(T payload)
         {
             ThrowIfDisposed();
 
-            var dehydreated = Dehydrate(payload);
+            var hydrator = settings.Hydrator;
+            using (Stream dehydreated = hydrator.Dehydrate(payload))
+            {
+                byte[] buffer = new byte[0x100];
+                int size = 0;
+                do
+                {
+                    size = ReadBytes(buffer, dehydreated);
 
-            writer.WriteLine(dehydreated);
-            writer.Flush();
+                    var header = HeaderPacktToByteArray(new HeaderPacket
+                    {
+                        Final = size < buffer.Length,
+                        Size = size
+                    });
+
+                    OutStream.Write(header, 0, header.Length);
+                    if (size > 0)
+                    {
+                        OutStream.Write(buffer, 0, size); 
+                    }
+                } while (size != 0);
+            }
+
+            OutStream.Flush();
 
             if (settings.WaitForDrain)
             {
@@ -164,7 +227,7 @@
         {
             if (!disposed && disposing)
             {
-                threadCancelationTokens.Cancel();
+                thrCancelTokens.Cancel();
                 try
                 {
                     listentingTask.Wait(settings.ReaderTimeout);
@@ -177,8 +240,8 @@
                     }
                 }
 
-                writer.Dispose();
-                reader.Dispose();
+                OutStream.Dispose();
+                InStream.Dispose();
 
                 bus.ForgetAll();
 
